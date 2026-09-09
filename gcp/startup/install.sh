@@ -186,6 +186,8 @@ for cmd in "${RUNNER_COMMANDS[@]}"; do
 		exit_with_failure "Runner command '$cmd' not found on the image"
 	fi
 done
+echo "Free disk on the boot disk after installation (margin for module caches and container images):"
+df -h /
 
 # Preemption notice: report a Spot reclaim (metadata flag or ACPI shutdown) to the manager.
 # The manager stamps gha-manager-url / gha-job-id / gha-runner-name into the instance
@@ -202,7 +204,8 @@ MD="http://metadata.google.internal/computeMetadata/v1"
 MARKER="/run/gha-preempt-notified"
 
 md() {
-	curl -sf -m 5 -H "Metadata-Flavor: Google" "$MD/$1"
+	# $2: curl max-time (default 5 s; the long-poll passes a value above its timeout_sec)
+	curl -sf -m "${2:-5}" -H "Metadata-Flavor: Google" "$MD/$1"
 }
 
 MANAGER_URL=$(md "instance/attributes/gha-manager-url" 2>/dev/null) || exit 0
@@ -218,8 +221,11 @@ notify() {
 	[ -e "$MARKER" ] && return 0
 	local preempted runner_active token body attempt
 	preempted=$(md "instance/preempted" 2>/dev/null || echo "UNKNOWN")
+	# An ephemeral runner removes its registration files once its job is done, so their
+	# presence means a job is still running (or the runner never got to run one); the process
+	# check is a fallback in case units are being stopped in parallel at shutdown.
 	runner_active="false"
-	if pgrep -f "Runner.Listener" >/dev/null 2>&1; then
+	if [ -f /actions-runner/.runner ] || pgrep -f "Runner.Listener" >/dev/null 2>&1; then
 		runner_active="true"
 	fi
 	token=$(md "instance/service-accounts/default/identity?audience=${MANAGER_URL}&format=full" 2>/dev/null || true)
@@ -243,9 +249,11 @@ notify() {
 case "$MODE" in
 	watch)
 		# Long-poll: the metadata server answers when the value changes or after timeout_sec.
+		# Check the current value first (a flip during a gap is not missed), then long-poll.
 		while true; do
-			value=$(md "instance/preempted?wait_for_change=true&timeout_sec=600" 2>/dev/null) || { sleep 5; continue; }
+			value=$(md "instance/preempted" 2>/dev/null || echo "")
 			[ "$value" = "TRUE" ] && break
+			md "instance/preempted?wait_for_change=true&timeout_sec=600" 620 >/dev/null 2>&1 || sleep 5
 		done
 		notify preempted
 		;;
@@ -266,7 +274,9 @@ sudo chmod 0755 /usr/local/bin/gha-preempt-notify.sh
 sudo tee /etc/systemd/system/gha-preempt-notify.service >/dev/null <<'UNIT'
 [Unit]
 Description=Report Spot preemption of this GitHub Actions runner VM to the manager
-After=network-online.target google-startup-scripts.service
+# Not ordered after google-startup-scripts.service: that oneshot unit runs the runner itself and
+# only exits when the job is finished, so anything After= it would never run during a job.
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -282,8 +292,9 @@ UNIT
 sudo tee /etc/systemd/system/gha-preempt-notify-shutdown.service >/dev/null <<'UNIT'
 [Unit]
 Description=Report shutdown of this GitHub Actions runner VM to the manager
-# Stopped (ExecStop) before the network and the runner go away at shutdown.
-After=network-online.target google-startup-scripts.service
+# Stopped (ExecStop) before the network goes away at shutdown. Not ordered after
+# google-startup-scripts.service (see gha-preempt-notify.service).
+After=network-online.target
 Wants=network-online.target
 Before=shutdown.target
 Conflicts=shutdown.target
