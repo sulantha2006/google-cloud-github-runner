@@ -311,7 +311,11 @@ variable "github_runners_auto_template_prefix" {
   }
 }
 
-# List of GitHub Actions runner configurations with instance specs
+# List of GitHub Actions runner configurations with instance specs.
+# Deployment-specific choices (dropping the ARM entries to skip the ARM image build, adding the
+# templates your workflows target, or removing types you do not need) belong in terraform.tfvars
+# (gitignored; see terraform.tfvars.example), not in these defaults: an override replaces the whole
+# list, and the gcp-auto ladder rungs below must stay in it (the validation refuses a list without them).
 variable "github_runners_types" {
   description = "GitHub Actions Runners instance types for different CPU architectures"
   type = list(object({
