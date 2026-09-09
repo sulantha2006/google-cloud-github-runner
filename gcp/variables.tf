@@ -102,7 +102,7 @@ variable "github_runners_manager_min_instance_count" {
 variable "github_runners_manager_max_instance_count" {
   description = "GitHub Actions Runners manager app maximum instance count (Max. number of Cloud Run instances)"
   type        = number
-  default     = 1
+  default     = 10
 
   validation {
     condition     = var.github_runners_manager_max_instance_count >= var.github_runners_manager_min_instance_count
