@@ -228,6 +228,14 @@ Cloud Scheduler therefore calls `POST /reconcile` every few minutes (OIDC-authen
 
 Every decision is logged with job id, VM name, zone and reason. `POST /reconcile?dry_run=1` reports without acting.
 
+### ⚡ Preemption notice
+
+Runner VMs built from `gcp/startup/install.sh` long-poll the metadata server's `preempted` flag and also hook the
+ACPI shutdown. When a Spot VM is reclaimed (or shut down while its runner is still working) it POSTs to
+`/runner/preempted` with its service-account OIDC token; the manager takes the instance identity from the token,
+logs the event at WARNING with job id, runner name and zone, and labels the instance `gha-preempted=true`.
+No automatic re-run happens yet.
+
 ## 🔐 Environment Variables
 
 | Variable                  | Description                    | Required                                   |
@@ -245,6 +253,8 @@ Every decision is logged with job id, VM name, zone and reason. `POST /reconcile
 | `RECONCILE_AUDIENCE`      | OIDC audience expected on `/reconcile` calls | No (route disabled when unset)            |
 | `RECONCILE_STUCK_MINUTES` | Age after which the reconciler creates or deletes | No (default: `10`)                   |
 | `RECONCILE_MAX_CREATES`   | Max. VMs one reconcile pass creates | No (default: `20`)                                |
+| `MANAGER_URL`             | Public URL of this service; stamped into VM metadata, OIDC audience for `/runner/preempted` | No (route disabled when unset) |
+| `RUNNER_SERVICE_ACCOUNT_EMAIL` | Service account of the runner VMs allowed to call `/runner/preempted` | No (route disabled when unset) |
 | `PORT`                    | Web server port                | No (default: `8080`)                       |
 | `SETUP_USERNAME`          | Setup authentication username  | No (default: `cloud`)                      |
 | `SETUP_PASSWORD`          | Setup authentication password  | No (default: `GOOGLE_CLOUD_PROJECT`)       |
@@ -259,6 +269,7 @@ Every decision is logged with job id, VM name, zone and reason. `POST /reconcile
 *   `POST /setup/trigger-restart` - Restart application (requires HTTP Basic Auth)
 *   `POST /webhook` - Main GitHub webhook receiver (requires valid GitHub webhook signature)
 *   `POST /reconcile` - Reconcile queued jobs with runner VMs (requires a Google OIDC token for `RECONCILE_INVOKER_EMAIL`)
+*   `POST /runner/preempted` - A runner VM reports a Spot preemption (requires the VM service account's OIDC token, `format=full`)
 
 ## 💻 Local Development
 

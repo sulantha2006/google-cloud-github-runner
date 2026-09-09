@@ -22,6 +22,13 @@ ZONE_CACHE_SECONDS = 600
 ZONE_LABEL = 'gha-zone'
 # Instance label that records the GitHub workflow job id the VM was created for.
 JOB_ID_LABEL = 'gha-job-id'
+# Instance labels set when the VM reports a Spot preemption (see /runner/preempted).
+PREEMPTED_LABEL = 'gha-preempted'
+PREEMPT_REASON_LABEL = 'gha-preempt-reason'
+# Instance metadata keys the VM's preemption notifier reads.
+MANAGER_URL_METADATA = 'gha-manager-url'
+JOB_ID_METADATA = 'gha-job-id'
+RUNNER_NAME_METADATA = 'gha-runner-name'
 # Instance name prefix shared by every runner VM the manager creates.
 INSTANCE_NAME_PREFIX = 'gcp-runner-'
 # Instance states that count as "alive" for the reconciler.
@@ -99,6 +106,8 @@ class GCloudClient:
         self.github_runner_group = os.environ.get('GITHUB_RUNNER_GROUP', '').strip()
         self.region = '-'.join(self.zone.split('-')[:-1])
         self.insert_timeout = int(os.environ.get('GCE_INSERT_TIMEOUT_SECONDS', DEFAULT_INSERT_TIMEOUT_SECONDS))
+        # Public URL of this manager; stamped into VM metadata so the VM can report preemptions.
+        self.manager_url = os.environ.get('MANAGER_URL', '').strip().rstrip('/')
 
         if not self.project_id:
             logger.warning("GOOGLE_CLOUD_PROJECT not set. GCloudClient will not work correctly.")
@@ -277,7 +286,13 @@ class GCloudClient:
             compute_v1.Items(key="startup-script", value=startup_script),
             compute_v1.Items(key="vmDnsSetting", value="ZonalOnly"),
             compute_v1.Items(key="block-project-ssh-keys", value="true"),
+            compute_v1.Items(key=RUNNER_NAME_METADATA, value=instance_name),
         ]
+        if job_id is not None:
+            metadata.items.append(compute_v1.Items(key=JOB_ID_METADATA, value=str(job_id)))
+        if self.manager_url:
+            # Read by the image's gha-preempt-notify service; without it the VM stays silent.
+            metadata.items.append(compute_v1.Items(key=MANAGER_URL_METADATA, value=self.manager_url))
         instance_resource.metadata = metadata
 
         # Try the configured zone first, then the other zones of the region (templates are
@@ -458,6 +473,58 @@ class GCloudClient:
                     'created_at': created_at,
                 })
         return instances
+
+    def get_instance(self, instance_name, zone):
+        """
+        Fetch one instance.
+
+        Returns:
+            compute_v1.Instance or None when it does not exist.
+        """
+        try:
+            return self.instance_client.get(project=self.project_id, zone=zone, instance=instance_name)
+        except gapi_exceptions.NotFound:
+            return None
+
+    def mark_instance_preempted(self, instance_name, zone, reason, delivery_id=None):
+        """
+        Record a preemption report on the instance as labels (gha-preempted, gha-preempt-reason).
+
+        Returns:
+            bool: True when the labels were set, False when the instance no longer exists.
+        """
+        instance = self.get_instance(instance_name, zone)
+        if instance is None:
+            logger.warning(
+                "Cannot label instance %s in zone %s as preempted: it no longer exists, delivery_id: %s",
+                instance_name,
+                zone,
+                delivery_id,
+            )
+            return False
+        labels = dict(getattr(instance, 'labels', None) or {})
+        labels[PREEMPTED_LABEL] = 'true'
+        labels[PREEMPT_REASON_LABEL] = re.sub(r'[^a-z0-9_-]', '-', str(reason).lower())[:63]
+        # https://docs.cloud.google.com/compute/docs/reference/rest/v1/instances/setLabels
+        request = compute_v1.SetLabelsInstanceRequest(
+            project=self.project_id,
+            zone=zone,
+            instance=instance_name,
+            instances_set_labels_request_resource=compute_v1.InstancesSetLabelsRequest(
+                labels=labels,
+                label_fingerprint=instance.label_fingerprint,
+            ),
+        )
+        operation = self.instance_client.set_labels(request=request)
+        logger.info(
+            "Labelled instance %s in zone %s as preempted (%s): operation %s, delivery_id: %s",
+            instance_name,
+            zone,
+            reason,
+            getattr(operation, 'name', '?'),
+            delivery_id,
+        )
+        return True
 
     def find_instance_zone(self, instance_name, delivery_id=None):
         """
