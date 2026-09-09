@@ -29,7 +29,7 @@ The infrastructure is managed via Terraform.
 1. **Webhook**: GitHub sends a `workflow_job.queued` event to the Flask app. With a Cloud Tasks queue configured the app enqueues one task per job (named by job id) and answers at once; the task calls `POST /tasks/provision`, which does steps 3-4.
 2. **Validation**: The app validates the webhook signature and checks if the job labels match a supported runner template.
 3. **Token Generation**: The app requests a runner registration token from GitHub.
-4. **Instance Creation**: The app creates a GCE instance using a startup script that installs the GitHub runner agent and registers it with the token. It waits for the insert operation; capacity errors fall back to the other zones of the region.
+4. **Instance Creation**: The app creates a GCE instance using a startup script that installs the GitHub runner agent and registers it with the token. It waits for the insert operation; capacity errors fall back to the other zones of the region. A `gcp-auto-<tier>-<cores>[-min<N>]` label walks a ladder of prebuilt templates (`app/utils/auto_label.py`) instead of one template.
 
 ### Runner Cleanup Flow
 - **Ephemeral Runners**: The runners are configured to be ephemeral (run once and terminate).

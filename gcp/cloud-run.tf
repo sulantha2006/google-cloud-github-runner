@@ -32,6 +32,7 @@ module "cloud_run_github_runners_manager" {
         GOOGLE_CLOUD_PROJECT = var.project_id
         GOOGLE_CLOUD_ZONE    = "${var.region}-${var.zone}"
         GITHUB_RUNNER_GROUP  = var.github_runner_group
+        AUTO_TEMPLATE_PREFIX = var.github_runners_auto_template_prefix
         # Reconciler (POST /reconcile) is only accepted from this caller with this audience
         RECONCILE_INVOKER_EMAIL        = module.service-account-github-runners-reconciler.email
         RECONCILE_AUDIENCE             = local.github_runners_manager_audience

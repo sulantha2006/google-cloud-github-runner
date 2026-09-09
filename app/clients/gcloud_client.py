@@ -11,6 +11,7 @@ import shlex
 import time
 import google.cloud.compute_v1 as compute_v1
 from google.api_core import exceptions as gapi_exceptions
+from app.utils.auto_label import InvalidAutoLabel, parse_auto_label, rung_template_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,8 @@ ZONE_CACHE_SECONDS = 600
 ZONE_LABEL = 'gha-zone'
 # Instance label that records the GitHub workflow job id the VM was created for.
 JOB_ID_LABEL = 'gha-job-id'
+# Instance label that records the gcp-auto rung the VM landed on (e.g. compute-8).
+RUNG_LABEL = 'gha-rung'
 # Instance labels set when the VM reports a Spot preemption (see /runner/preempted).
 PREEMPTED_LABEL = 'gha-preempted'
 PREEMPT_REASON_LABEL = 'gha-preempt-reason'
@@ -199,9 +202,20 @@ class GCloudClient:
         return None
 
     def has_template_for(self, label, templates=None):
-        """True when a job label has a matching instance template (resolved against ``templates`` if given)."""
+        """
+        True when a job label can be provisioned: an explicit label with a matching template, or a
+        gcp-auto request with a template for at least one rung of its ladder. Malformed gcp-auto
+        labels return False.
+        """
+        try:
+            auto_request = parse_auto_label(label)
+        except InvalidAutoLabel:
+            return False
         if templates is None:
             templates = self.list_templates()
+        if auto_request:
+            return any(self._get_template_name(rung_template_prefix(rung), templates=templates) is not None
+                       for rung in auto_request.ladder())
         return self._get_template_name(label, templates=templates) is not None
 
     def create_runner_instance(
@@ -220,7 +234,8 @@ class GCloudClient:
         Args:
             registration_token (str): The GitHub Actions runner registration token.
             repo_url (str): The URL of the repository or organization.
-            template_name (str): The name of the instance template to use.
+            template_name (str): The job label: either a template name prefix (explicit) or a
+                ``gcp-auto-<tier>-<cores>[-min<N>]`` request that walks the failover ladder.
             instance_label (str): Label to add to the Instance for Cost Tracking.
             delivery_id (str): The GitHub webhook delivery ID for log correlation.
             job_id (int|str): GitHub workflow job id. When given, the instance is named after it
@@ -233,24 +248,49 @@ class GCloudClient:
             str or None: The name of the created instance, or None when no template matches.
 
         Raises:
-            ZoneCapacityError: no zone of the region had capacity.
+            InvalidAutoLabel: the label uses the gcp-auto- grammar but is malformed.
+            ZoneCapacityError: no zone (and, for auto requests, no rung above the floor) had capacity.
             InstanceCreationError: any other creation failure.
         """
-        template = self._get_template_name(template_name)
-        if template is None:
-            logger.warning(
-                "No matching instance template found for label '%s' in region %s. "
-                "Skipping instance creation. delivery_id: %s",
-                template_name,
-                self.region,
+        auto_request = parse_auto_label(template_name)
+        templates = self.list_templates()
+        if auto_request:
+            # rung -> template; rungs without a template are skipped with a warning.
+            rungs = []
+            for rung in auto_request.ladder():
+                template = self._get_template_name(rung_template_prefix(rung), templates=templates)
+                if template is None:
+                    logger.warning(
+                        "gcp-auto %s: no matching instance template for rung %s (prefix %s) in region %s; "
+                        "skipping rung, delivery_id: %s",
+                        template_name, rung, rung_template_prefix(rung), self.region, delivery_id,
+                    )
+                    continue
+                rungs.append((rung, template))
+            if not rungs:
+                logger.warning(
+                    "gcp-auto %s: no instance template for any rung of the ladder in region %s. "
+                    "Skipping instance creation. delivery_id: %s",
+                    template_name, self.region, delivery_id,
+                )
+                return None
+        else:
+            template = self._get_template_name(template_name, templates=templates)
+            if template is None:
+                logger.warning(
+                    "No matching instance template found for label '%s' in region %s. "
+                    "Skipping instance creation. delivery_id: %s",
+                    template_name,
+                    self.region,
+                    delivery_id,
+                )
+                return None
+            logger.info(
+                "Found matching instance template: %s, delivery_id: %s",
+                template.name,
                 delivery_id,
             )
-            return None
-        logger.info(
-            "Found matching instance template: %s, delivery_id: %s",
-            template.name,
-            delivery_id,
-        )
+            rungs = [(None, template)]
 
         # Name must start with a lowercase letter followed by up to 62 lowercase letters,
         # numbers, or hyphens, and cannot end with a hyphen.
@@ -258,7 +298,7 @@ class GCloudClient:
             instance_id = f"{job_id}{name_suffix}"
         else:
             instance_id = uuid.uuid4().hex[:16]
-        if template.name.startswith("dependabot"):
+        if rungs[0][1].name.startswith("dependabot"):
             instance_name = f"{INSTANCE_NAME_PREFIX}dependabot-{instance_id}"
         else:
             instance_name = f"{INSTANCE_NAME_PREFIX}{instance_id}"
@@ -274,40 +314,78 @@ class GCloudClient:
         if job_id is not None:
             labels[JOB_ID_LABEL] = str(job_id)
 
-        logger.info(
-            "Creating GCE instance %s with template %s, delivery_id: %s",
-            instance_name,
-            template.self_link,
-            delivery_id,
-        )
-
-        def metadata_for(zone):
-            return self._build_metadata(registration_token, repo_url, template_name, instance_name, job_id)
-
-        try:
-            self._insert_across_zones(instance_name, template, labels, metadata_for, delivery_id)
-        except ZoneCapacityError as e:
-            # Every zone of the region ran out of capacity; _insert_across_zones logged each attempt.
-            tried = ', '.join(f"{a.zone} ({a.code})" for a in e.attempts)
-            logger.error(
-                "No zone in region %s could create instance %s; tried %s, delivery_id: %s",
-                self.region,
+        rung_failures = []
+        for rung, template in rungs:
+            logger.info(
+                "Creating GCE instance %s with template %s%s, delivery_id: %s",
                 instance_name,
-                tried,
+                template.self_link,
+                f" (gcp-auto rung {rung})" if rung else "",
                 delivery_id,
             )
-            raise
-        return instance_name
+            rung_labels = dict(labels)
+            if rung:
+                rung_labels[RUNG_LABEL] = label_value(rung)
 
-    def _build_metadata(self, registration_token, repo_url, template_name, instance_name, job_id):
-        """Instance metadata: the startup script that registers the runner."""
+            def metadata_for(zone, rung=rung):
+                return self._build_metadata(
+                    registration_token, repo_url, template_name, instance_name, job_id,
+                    auto_request=auto_request, rung=rung, zone=zone,
+                )
+
+            try:
+                zone = self._insert_across_zones(instance_name, template, rung_labels, metadata_for, delivery_id)
+            except ZoneCapacityError as e:
+                rung_failures.append((rung, e))
+                continue
+            if rung:
+                logger.info(
+                    "gcp-auto %s: requested %s, landed %s in %s for instance %s, delivery_id: %s",
+                    template_name, auto_request.requested_rung, rung, zone, instance_name, delivery_id,
+                )
+            return instance_name
+
+        # Every rung (explicit labels have exactly one) ran out of capacity in every zone.
+        tried = '; '.join(
+            (f"{rung}: " if rung else "") + ', '.join(f"{a.zone} ({a.code})" for a in e.attempts)
+            for rung, e in rung_failures
+        )
+        if auto_request:
+            message = (
+                f"gcp-auto {template_name}: no capacity for {instance_name} down to the floor (min{auto_request.floor}); "
+                f"tried {tried}"
+            )
+        else:
+            message = f"No zone in region {self.region} could create {instance_name}; tried {tried}"
+        logger.error("%s, delivery_id: %s", message, delivery_id)
+        last = rung_failures[-1][1]
+        raise ZoneCapacityError(message, code=last.code, zone=last.zone) from last
+
+    def _build_metadata(self, registration_token, repo_url, template_name, instance_name, job_id,
+                        auto_request=None, rung=None, zone=None):
+        """Instance metadata: the startup script that registers the runner, plus the notifier keys."""
         # Use shlex.quote to prevent command injection
         runner_group_flag = ""
         if self.github_runner_group:
             runner_group_flag = f" --runnergroup {shlex.quote(self.github_runner_group)}"
 
+        prelude = ""
+        if auto_request is not None and rung:
+            # Record what landed: on the serial console (startup output) and in every job log
+            # through the runner's job-started hook (ACTIONS_RUNNER_HOOK_JOB_STARTED).
+            line = f"gcp-auto: requested {auto_request.requested_rung}, landed {rung} in {zone}"
+            hook = "/actions-runner/gcp-auto-job-started.sh"
+            prelude = (
+                f"echo {shlex.quote(line)} && "
+                f"printf '%s\\n' '#!/usr/bin/env bash' {shlex.quote('echo ' + shlex.quote(line))} > {hook} && "
+                f"chmod 0755 {hook} && chown runner:runner {hook} && "
+                f"echo ACTIONS_RUNNER_HOOK_JOB_STARTED={hook} >> /actions-runner/.env && "
+                "chown runner:runner /actions-runner/.env && "
+            )
+
         startup_script = (
             "cd /actions-runner && "
+            f"{prelude}"
             f"sudo -u runner ./config.sh --url {shlex.quote(repo_url)} "
             f"--token {shlex.quote(registration_token)} "
             f"--name {shlex.quote(instance_name)} "

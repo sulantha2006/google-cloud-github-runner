@@ -225,6 +225,22 @@ Without a queue the webhook creates inline, which takes about 10 seconds (more w
 exceeds GitHub's 10-second delivery timeout; the VM is still created and a failed insert is a `500`
 plus an ERROR log, never a silent success.
 
+### 🎚️ Auto-failover labels
+
+Beside an explicit template label, a job may request a machine class with
+`runs-on: gcp-auto-<tier>-<cores>[-min<N>]` (tier `compute` or `general`, cores 16/8/4/2, optional floor,
+default `min2`). The manager walks a ladder of prebuilt templates until one zone of the region has capacity:
+
+*   compute: c4-16 > e2-16 > c4-8 > e2-8 > c4-4 > e2-4 > c4-2 > e2-2 (compute may downgrade into general)
+*   general: e2-16 > e2-8 > e2-4 > e2-2 (general never tries compute)
+
+Order is rung → every zone → next rung. Below the floor the manager fails loudly (ERROR log naming every rung,
+zone and operation error code) instead of landing on a smaller machine. The landed rung and zone are stored in
+the `gha-rung` and `gha-zone` instance labels and printed into the job log
+(`gcp-auto: requested compute-16, landed general-16 in us-central1-b`). The templates are the
+`gcp-ubuntu-24-04-<rung>` entries of `github_runners_types` in Terraform (`github_runners_auto_template_prefix`).
+Explicit labels are unaffected.
+
 ### 🔁 Reconciler
 
 Webhooks are best effort. A dropped delivery leaves a job queued with no VM, a runner that never
@@ -273,6 +289,7 @@ No automatic re-run happens yet.
 | `GITHUB_WEBHOOK_SECRET`   | Webhook signature secret       | Yes                                        |
 | `GOOGLE_CLOUD_PROJECT`    | Google Cloud Project ID        | Yes                                        |
 | `GOOGLE_CLOUD_ZONE`       | Preferred GCP zone for runners; other zones of the region are tried on capacity errors | No (default: `us-central1-a`) |
+| `AUTO_TEMPLATE_PREFIX`    | Template name prefix of the `gcp-auto` ladder rungs | No (default: `gcp-ubuntu-24-04`)                  |
 | `GCE_INSERT_TIMEOUT_SECONDS` | Max. seconds to wait for a VM insert operation | No (default: `120`)                     |
 | `RECONCILE_INVOKER_EMAIL` | Service account allowed to call `/reconcile` | No (route disabled when unset)            |
 | `RECONCILE_AUDIENCE`      | OIDC audience expected on `/reconcile` calls | No (route disabled when unset)            |

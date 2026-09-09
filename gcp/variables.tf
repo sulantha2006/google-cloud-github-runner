@@ -358,6 +358,19 @@ variable "github_runners_default_type" {
   }
 }
 
+# Name prefix of the templates the gcp-auto-<tier>-<cores> ladder walks (<prefix>-<rung>-<timestamp>)
+variable "github_runners_auto_template_prefix" {
+  description = "Template name prefix for the gcp-auto failover ladder rungs (<prefix>-compute-16, <prefix>-general-2, ...)"
+  type        = string
+  default     = "gcp-ubuntu-24-04"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]*[a-z0-9]$", var.github_runners_auto_template_prefix))
+    error_message = "Prefix must be lowercase letters, digits and hyphens."
+  }
+}
+
 # List of GitHub Actions runner configurations with instance specs
 variable "github_runners_types" {
   description = "GitHub Actions Runners instance types for different CPU architectures"
@@ -519,6 +532,105 @@ variable "github_runners_types" {
       image                       = "ubuntu-2404-lts-amd64"
       arch                        = "amd64"
     },
+    # Rungs of the gcp-auto-<tier>-<cores> failover ladder (see app/utils/auto_label.py):
+    # compute: c4-16 > e2-16 > c4-8 > e2-8 > c4-4 > e2-4 > c4-2 > e2-2, general: e2-16 > e2-8 > e2-4 > e2-2.
+    # 25 GB disks for 2 and 4 cores, 100 GB for 8 and 16; c4 needs hyperdisk-balanced.
+    {
+      name                        = "gcp-ubuntu-24-04-compute-16"
+      instance_type               = "c4-standard-16"
+      vcpu                        = 16
+      memory                      = 60
+      disk_type                   = "hyperdisk-balanced"
+      disk_size                   = 100
+      disk_provisioned_iops       = 3600
+      disk_provisioned_throughput = 290
+      image                       = "ubuntu-2404-lts-amd64"
+      arch                        = "amd64"
+    },
+    {
+      name                        = "gcp-ubuntu-24-04-compute-8"
+      instance_type               = "c4-standard-8"
+      vcpu                        = 8
+      memory                      = 30
+      disk_type                   = "hyperdisk-balanced"
+      disk_size                   = 100
+      disk_provisioned_iops       = 3600
+      disk_provisioned_throughput = 290
+      image                       = "ubuntu-2404-lts-amd64"
+      arch                        = "amd64"
+    },
+    {
+      name                        = "gcp-ubuntu-24-04-compute-4"
+      instance_type               = "c4-standard-4"
+      vcpu                        = 4
+      memory                      = 15
+      disk_type                   = "hyperdisk-balanced"
+      disk_size                   = 25
+      disk_provisioned_iops       = 3600
+      disk_provisioned_throughput = 290
+      image                       = "ubuntu-2404-lts-amd64"
+      arch                        = "amd64"
+    },
+    {
+      name                        = "gcp-ubuntu-24-04-compute-2"
+      instance_type               = "c4-standard-2"
+      vcpu                        = 2
+      memory                      = 7.5
+      disk_type                   = "hyperdisk-balanced"
+      disk_size                   = 25
+      disk_provisioned_iops       = 3600
+      disk_provisioned_throughput = 290
+      image                       = "ubuntu-2404-lts-amd64"
+      arch                        = "amd64"
+    },
+    {
+      name                        = "gcp-ubuntu-24-04-general-16"
+      instance_type               = "e2-standard-16"
+      vcpu                        = 16
+      memory                      = 64
+      disk_type                   = "pd-ssd"
+      disk_size                   = 100
+      disk_provisioned_iops       = 0
+      disk_provisioned_throughput = 0
+      image                       = "ubuntu-2404-lts-amd64"
+      arch                        = "amd64"
+    },
+    {
+      name                        = "gcp-ubuntu-24-04-general-8"
+      instance_type               = "e2-standard-8"
+      vcpu                        = 8
+      memory                      = 32
+      disk_type                   = "pd-ssd"
+      disk_size                   = 100
+      disk_provisioned_iops       = 0
+      disk_provisioned_throughput = 0
+      image                       = "ubuntu-2404-lts-amd64"
+      arch                        = "amd64"
+    },
+    {
+      name                        = "gcp-ubuntu-24-04-general-4"
+      instance_type               = "e2-standard-4"
+      vcpu                        = 4
+      memory                      = 16
+      disk_type                   = "pd-ssd"
+      disk_size                   = 25
+      disk_provisioned_iops       = 0
+      disk_provisioned_throughput = 0
+      image                       = "ubuntu-2404-lts-amd64"
+      arch                        = "amd64"
+    },
+    {
+      name                        = "gcp-ubuntu-24-04-general-2"
+      instance_type               = "e2-standard-2"
+      vcpu                        = 2
+      memory                      = 8
+      disk_type                   = "pd-ssd"
+      disk_size                   = 25
+      disk_provisioned_iops       = 0
+      disk_provisioned_throughput = 0
+      image                       = "ubuntu-2404-lts-amd64"
+      arch                        = "amd64"
+    },
     {
       name                        = "gcp-ubuntu-slim-arm"
       instance_type               = "c4a-standard-1"
@@ -640,6 +752,15 @@ variable "github_runners_types" {
       arch                        = "arm64"
     },
   ]
+
+  validation {
+    # Every rung of the gcp-auto ladder needs a prebuilt template named <auto prefix>-<rung>.
+    condition = alltrue([
+      for rung in ["compute-16", "compute-8", "compute-4", "compute-2", "general-16", "general-8", "general-4", "general-2"] :
+      contains([for config in var.github_runners_types : config.name], "${var.github_runners_auto_template_prefix}-${rung}")
+    ])
+    error_message = "github_runners_types must contain a template for every gcp-auto ladder rung (<github_runners_auto_template_prefix>-<compute|general>-<16|8|4|2>)."
+  }
 
   validation {
     condition = alltrue([
