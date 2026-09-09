@@ -64,6 +64,14 @@ module "cloud_run_github_runners_manager" {
           secret  = module.secret-manager.ids["github-webhook-secret"]
           version = "latest"
         }
+        SETUP_USERNAME = {
+          secret  = module.secret-manager.ids["setup-username"]
+          version = "latest"
+        }
+        SETUP_PASSWORD = {
+          secret  = module.secret-manager.ids["setup-password"]
+          version = "latest"
+        }
       }
     }
   }
@@ -89,6 +97,7 @@ module "cloud_run_github_runners_manager" {
   deletion_protection = false
   depends_on = [
     google_secret_manager_secret_version.secret-version-default,
+    google_secret_manager_secret_version.secret-version-setup,
     time_sleep.wait_for_service_account_cloud_run,
     time_sleep.wait_for_service_account_reconciler
   ]

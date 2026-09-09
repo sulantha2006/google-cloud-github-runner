@@ -133,9 +133,10 @@ Complete the setup via the provided web interface:
 
 1.  **Access Setup:** Navigate to `service_url` (from Terraform output).
     
-    **Authentication Required:** All `/setup` routes are protected with HTTP Basic Authentication:
-    - **Username:** `cloud`
-    - **Password:** Your Google Cloud Project ID (value of `GOOGLE_CLOUD_PROJECT`)
+    **Authentication Required:** All `/setup` routes are protected with HTTP Basic Authentication.
+    The username and password are the Terraform variables `github_runners_manager_setup_username` and
+    `github_runners_manager_setup_password`; Terraform stores them in Secret Manager (`setup-username`,
+    `setup-password`) and mounts them on the service. Without them the setup pages refuse every login.
 2.  **Create & Install:** Click **Setup GitHub App**, then install it on your target Organization or Repository.
 3.  **Auto-Configuration:** The system handles the rest automatically:
     *   **Secure Storage:** Saves the Private Key to Secret Manager.
@@ -279,14 +280,14 @@ No automatic re-run happens yet.
 | `MANAGER_URL`             | Public URL of this service; stamped into VM metadata, OIDC audience for `/runner/preempted` | No (route disabled when unset) |
 | `RUNNER_SERVICE_ACCOUNT_EMAIL` | Service account of the runner VMs allowed to call `/runner/preempted` | No (route disabled when unset) |
 | `PORT`                    | Web server port                | No (default: `8080`)                       |
-| `SETUP_USERNAME`          | Setup authentication username  | No (default: `cloud`)                      |
-| `SETUP_PASSWORD`          | Setup authentication password  | No (default: `GOOGLE_CLOUD_PROJECT`)       |
+| `SETUP_USERNAME`          | Setup authentication username  | Yes for `/setup` (no default; from Secret Manager) |
+| `SETUP_PASSWORD`          | Setup authentication password  | Yes for `/setup` (no default; from Secret Manager) |
 
 *\*One of `GITHUB_PRIVATE_KEY` or `GITHUB_PRIVATE_KEY_PATH` must be set.*
 
 ## 📡 API Endpoints
 
-*   `GET /setup/` - Setup interface (requires HTTP Basic Auth: username `cloud`, password is your Project ID)
+*   `GET /setup/` - Setup interface (requires HTTP Basic Auth: `SETUP_USERNAME` / `SETUP_PASSWORD`)
 *   `GET /setup/callback` - OAuth callback handler (requires HTTP Basic Auth)
 *   `GET /setup/complete` - Post-installation handler (requires HTTP Basic Auth)
 *   `POST /setup/trigger-restart` - Restart application (requires HTTP Basic Auth)
