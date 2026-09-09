@@ -253,6 +253,14 @@ log-based metrics: **reconciler heartbeat missing** (no completed pass for 15 mi
 without a runner** (`oldest_queued_job_age_seconds` above 30 minutes). `tools/alert-drill.sh` feeds a synthetic
 value or pauses the scheduler to prove each one fires.
 
+### ⚡ Preemption notice
+
+Runner VMs built from `gcp/startup/install.sh` long-poll the metadata server's `preempted` flag and also hook the
+ACPI shutdown. When a Spot VM is reclaimed (or shut down while its runner is still working) it POSTs to
+`/runner/preempted` with its service-account OIDC token; the manager takes the instance identity from the token,
+logs the event at WARNING with job id, runner name and zone, and labels the instance `gha-preempted=true`.
+No automatic re-run happens yet.
+
 ## 🔐 Environment Variables
 
 | Variable                  | Description                    | Required                                   |
@@ -274,9 +282,10 @@ value or pauses the scheduler to prove each one fires.
 | `RECONCILE_SLOW_RETRY_HOURS` | Jobs queued longer than this are retried at a reduced rate (never dropped) | No (default: `6`) |
 | `RECONCILE_SLOW_RETRY_MINUTES` | Interval between attempts for such jobs | No (default: `60`)                         |
 | `RECONCILE_INTERVAL_MINUTES` | Minutes between passes (matches the scheduler) | No (default: `5`)                      |
-| `MANAGER_URL`             | Public URL of this service; OIDC audience for `/tasks/provision` | No (route disabled when unset) |
 | `PROVISION_QUEUE`         | Cloud Tasks queue path (`projects/../locations/../queues/..`) for webhook hand-off | No (inline creation when unset) |
 | `PROVISION_INVOKER_EMAIL` | Service account Cloud Tasks uses to call `/tasks/provision` | No (route disabled when unset)      |
+| `MANAGER_URL`             | Public URL of this service; stamped into VM metadata, OIDC audience for `/runner/preempted` and `/tasks/provision` | No (routes disabled when unset) |
+| `RUNNER_SERVICE_ACCOUNT_EMAIL` | Service account of the runner VMs allowed to call `/runner/preempted` | No (route disabled when unset) |
 | `PORT`                    | Web server port                | No (default: `8080`)                       |
 | `SETUP_USERNAME`          | Setup authentication username  | No (default: `cloud`)                      |
 | `SETUP_PASSWORD`          | Setup authentication password  | No (default: `GOOGLE_CLOUD_PROJECT`)       |
@@ -292,6 +301,7 @@ value or pauses the scheduler to prove each one fires.
 *   `POST /webhook` - Main GitHub webhook receiver (requires valid GitHub webhook signature)
 *   `POST /reconcile` - Reconcile queued jobs with runner VMs (requires a Google OIDC token for `RECONCILE_INVOKER_EMAIL`)
 *   `POST /tasks/provision` - Cloud Tasks handler that creates one job's VM (requires a Google OIDC token for `PROVISION_INVOKER_EMAIL`)
+*   `POST /runner/preempted` - A runner VM reports a Spot preemption (requires the VM service account's OIDC token, `format=full`)
 
 ## 💻 Local Development
 
