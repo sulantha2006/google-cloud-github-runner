@@ -38,6 +38,7 @@ module "cloud_run_github_runners_manager" {
         RECONCILE_AUDIENCE      = local.github_runners_manager_audience
         RECONCILE_STUCK_MINUTES = tostring(var.github_runners_reconcile_stuck_minutes)
         RECONCILE_REPOSITORIES  = join(",", var.github_runners_reconcile_repositories)
+        RECONCILE_GIVE_UP_HOURS = tostring(var.github_runners_reconcile_give_up_hours)
         # Stamped into runner VM metadata so the VM can report a Spot preemption to POST /runner/preempted;
         # only that route's caller (the runner VM service account) is accepted, with this URL as audience.
         MANAGER_URL                  = local.github_runners_manager_audience
@@ -78,6 +79,8 @@ module "cloud_run_github_runners_manager" {
   service_config = {
     # A reconcile pass may wait for several Compute insert operations; keep the request timeout above it.
     timeout = "${var.github_runners_reconcile_attempt_deadline}s"
+    # Matches gunicorn's thread count (Dockerfile): webhook requests block on the insert operation.
+    max_concurrency = 32
     # Disable IAM permission check
     # There should be no requirement to pass the roles/run.invoker to the IAM block to enable public access.
     # This allows for the org policy domain restricted sharing org policy remain enabled.

@@ -235,6 +235,10 @@ the `gha-rung` and `gha-zone` instance labels and printed into the job log
 `gcp-ubuntu-24-04-<rung>` entries of `github_runners_types` in Terraform (`github_runners_auto_template_prefix`).
 Explicit labels are unaffected.
 
+Worst case for one request is every rung times every zone (8 rungs × 4 zones × about 7 s per stockout, roughly
+4 minutes) before the loud failure, and a reconcile pass runs up to `RECONCILE_MAX_CREATES` of those through
+`RECONCILE_CREATE_WORKERS` workers inside the Cloud Run request timeout; lower the cap when auto labels are common.
+
 ### 🔁 Reconciler
 
 Webhooks are best effort. A dropped delivery leaves a job queued with no VM, a runner that never
@@ -277,6 +281,7 @@ No automatic re-run happens yet.
 | `RECONCILE_STUCK_MINUTES` | Age after which the reconciler creates or deletes | No (default: `10`)                   |
 | `RECONCILE_MAX_CREATES`   | Max. VMs one reconcile pass creates | No (default: `20`)                                |
 | `RECONCILE_REPOSITORIES`  | Comma-separated `owner/repo` list to restrict the scan | No (default: every installed repo)  |
+| `RECONCILE_GIVE_UP_HOURS` | Stop re-provisioning a job queued longer than this | No (default: `6`)                     |
 | `MANAGER_URL`             | Public URL of this service; stamped into VM metadata, OIDC audience for `/runner/preempted` | No (route disabled when unset) |
 | `RUNNER_SERVICE_ACCOUNT_EMAIL` | Service account of the runner VMs allowed to call `/runner/preempted` | No (route disabled when unset) |
 | `PORT`                    | Web server port                | No (default: `8080`)                       |
