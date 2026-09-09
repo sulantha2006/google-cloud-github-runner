@@ -10,9 +10,8 @@ zone   = "b"
 # Runner VMs are force-deleted after this many seconds (default: 5 days).
 # github_runners_max_run_duration = 10800
 
-# Reconciler: restrict the scan to the repositories that use these runners (default: every
-# repository the GitHub App installation can see).
-# github_runners_reconcile_repositories = ["my-org/my-repo"]
+# Reconciler: every repository the GitHub App is installed on is scanned; list any to ignore.
+# github_runners_reconcile_exclude_repositories = ["my-org/archived-repo"]
 
 # Templates. Overriding replaces the whole default list, so keep the eight gcp-auto ladder rungs
 # (the validation refuses a list without them). Leaving out every arch = "arm64" entry also skips
