@@ -138,6 +138,20 @@ variable "github_runners_provision_max_attempts" {
     error_message = "Max attempts must be between 1 and 100."
   }
 }
+# HTTP Basic Auth credentials for the /setup pages, stored in Secret Manager and mounted on the service
+variable "github_runners_manager_setup_username" {
+  description = "Username for the GitHub Actions Runners manager /setup pages (stored in Secret Manager)"
+  type        = string
+  nullable    = false
+    condition     = length(var.github_runners_manager_setup_username) >= 3
+    error_message = "Setup username must be at least 3 characters."
+variable "github_runners_manager_setup_password" {
+  description = "Password for the GitHub Actions Runners manager /setup pages (stored in Secret Manager)"
+  type        = string
+  sensitive   = true
+  nullable    = false
+    condition     = length(var.github_runners_manager_setup_password) >= 12
+    error_message = "Setup password must be at least 12 characters."
 # Cron schedule for the reconciler that creates VMs for stuck queued jobs and deletes idle runner VMs
 variable "github_runners_reconcile_schedule" {
   description = "Cloud Scheduler cron schedule (UTC) for the reconcile pass of the GitHub Actions Runners manager; must be of the form */N * * * *"
