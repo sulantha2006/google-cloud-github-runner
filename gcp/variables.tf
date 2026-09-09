@@ -7,6 +7,7 @@ variable "apis" {
     "cloudbuild.googleapis.com",
     "cloudresourcemanager.googleapis.com",
     "cloudscheduler.googleapis.com",
+    "cloudtasks.googleapis.com",
     "compute.googleapis.com",
     "iam.googleapis.com",
     "logging.googleapis.com",
@@ -129,6 +130,40 @@ variable "github_runners_manager_setup_password" {
   validation {
     condition     = length(var.github_runners_manager_setup_password) >= 12
     error_message = "Setup password must be at least 12 characters."
+  }
+}
+
+# Cloud Tasks queue that carries webhook -> VM creation
+variable "github_runners_provision_max_dispatches_per_second" {
+  description = "Cloud Tasks dispatch rate for runner provisioning (tasks started per second)"
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.github_runners_provision_max_dispatches_per_second > 0 && var.github_runners_provision_max_dispatches_per_second <= 500
+    error_message = "Dispatch rate must be between 0 and 500."
+  }
+}
+
+variable "github_runners_provision_max_concurrent_dispatches" {
+  description = "Cloud Tasks concurrent provisioning tasks in flight (each blocks on one Compute insert operation)"
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.github_runners_provision_max_concurrent_dispatches >= 1 && var.github_runners_provision_max_concurrent_dispatches <= 1000
+    error_message = "Concurrent dispatches must be between 1 and 1000."
+  }
+}
+
+variable "github_runners_provision_max_attempts" {
+  description = "Cloud Tasks attempts per provisioning task before it is left to the reconciler (30 s to 300 s backoff)"
+  type        = number
+  default     = 8
+
+  validation {
+    condition     = var.github_runners_provision_max_attempts >= 1 && var.github_runners_provision_max_attempts <= 100
+    error_message = "Max attempts must be between 1 and 100."
   }
 }
 
