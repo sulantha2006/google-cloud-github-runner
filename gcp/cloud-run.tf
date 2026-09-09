@@ -36,6 +36,7 @@ module "cloud_run_github_runners_manager" {
         RECONCILE_INVOKER_EMAIL = module.service-account-github-runners-reconciler.email
         RECONCILE_AUDIENCE      = local.github_runners_manager_audience
         RECONCILE_STUCK_MINUTES = tostring(var.github_runners_reconcile_stuck_minutes)
+        RECONCILE_REPOSITORIES  = join(",", var.github_runners_reconcile_repositories)
         # Stamped into runner VM metadata so the VM can report a Spot preemption to POST /runner/preempted;
         # only that route's caller (the runner VM service account) is accepted, with this URL as audience.
         MANAGER_URL                  = local.github_runners_manager_audience

@@ -253,6 +253,7 @@ No automatic re-run happens yet.
 | `RECONCILE_AUDIENCE`      | OIDC audience expected on `/reconcile` calls | No (route disabled when unset)            |
 | `RECONCILE_STUCK_MINUTES` | Age after which the reconciler creates or deletes | No (default: `10`)                   |
 | `RECONCILE_MAX_CREATES`   | Max. VMs one reconcile pass creates | No (default: `20`)                                |
+| `RECONCILE_REPOSITORIES`  | Comma-separated `owner/repo` list to restrict the scan | No (default: every installed repo)  |
 | `MANAGER_URL`             | Public URL of this service; stamped into VM metadata, OIDC audience for `/runner/preempted` | No (route disabled when unset) |
 | `RUNNER_SERVICE_ACCOUNT_EMAIL` | Service account of the runner VMs allowed to call `/runner/preempted` | No (route disabled when unset) |
 | `PORT`                    | Web server port                | No (default: `8080`)                       |
