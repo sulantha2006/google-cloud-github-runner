@@ -52,11 +52,9 @@ resource "google_secret_manager_secret_version" "secret-version-default" {
 
 # Setup page credentials, set from Terraform variables (a new version on every change)
 resource "google_secret_manager_secret_version" "secret-version-setup" {
-  for_each = {
-    setup-username = var.github_runners_manager_setup_username
-    setup-password = var.github_runners_manager_setup_password
-  }
+  # Static keys: a for_each over a sensitive value is rejected by Terraform.
+  for_each = toset(["setup-username", "setup-password"])
 
   secret      = module.secret-manager.ids[each.key]
-  secret_data = each.value
+  secret_data = each.key == "setup-username" ? var.github_runners_manager_setup_username : var.github_runners_manager_setup_password
 }

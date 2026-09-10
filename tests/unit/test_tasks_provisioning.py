@@ -248,9 +248,10 @@ class TestProvisionRoute:
 
     @patch('app.routes.tasks.WebhookService')
     @patch('google.oauth2.id_token.verify_oauth2_token')
-    def test_invalid_task_body_is_not_retried(self, verify, service_class, client, route_env):
+    def test_malformed_label_is_not_retried(self, verify, service_class, client, route_env):
+        from app.utils.auto_label import InvalidAutoLabel
         verify.return_value = _claims()
-        service_class.return_value.provision_from_task.side_effect = ValueError('Invalid repo_url in provisioning task')
+        service_class.return_value.provision_from_task.side_effect = InvalidAutoLabel('bad label')
         response = client.post('/tasks/provision', json=TASK, headers={'Authorization': 'Bearer t'})
         assert response.status_code == 200
         assert response.get_json()['status'] == 'skipped'

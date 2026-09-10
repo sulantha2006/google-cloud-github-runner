@@ -220,7 +220,8 @@ With `PROVISION_QUEUE` configured (Terraform does this), the webhook does not cr
 verifies the signature, enqueues one Cloud Tasks task named after the job id and answers GitHub at once.
 A redelivery of the same job collides on the task name and is ignored. Cloud Tasks then calls
 `POST /tasks/provision` (OIDC token of the provisioner service account) which re-checks that the job is
-still queued and has no live VM, and creates it through the same path (operation wait, zone fallback). A capacity error answers `503` so the queue retries with backoff (30 s to 5 min, 8
+still queued and has no live VM, and creates it through the same path (operation wait, zone fallback,
+`gcp-auto` ladder). A capacity error answers `503` so the queue retries with backoff (30 s to 5 min, 8
 attempts by default); a task that exhausts its attempts is left to the reconciler, never dropped.
 Without a queue the webhook creates inline, which takes about 10 seconds (more with zone fallback) and
 exceeds GitHub's 10-second delivery timeout; the VM is still created and a failed insert is a `500`
@@ -241,6 +242,10 @@ the `gha-rung` and `gha-zone` instance labels and printed into the job log
 (`gcp-auto: requested compute-16, landed general-16 in us-central1-b`). The templates are the
 `gcp-ubuntu-24-04-<rung>` entries of `github_runners_types` in Terraform (`github_runners_auto_template_prefix`).
 Explicit labels are unaffected.
+
+Worst case for one request is every rung times every zone (8 rungs × 4 zones × about 7 s per stockout, roughly
+4 minutes) before the loud failure, and a reconcile pass runs up to `RECONCILE_MAX_CREATES` of those (shared round-robin across repositories, oldest job first within each) through
+`RECONCILE_CREATE_WORKERS` workers inside the Cloud Run request timeout; lower the cap when auto labels are common.
 
 ### 🔁 Reconciler
 
@@ -300,9 +305,9 @@ No automatic re-run happens yet.
 | `RECONCILE_SLOW_RETRY_HOURS` | Jobs queued longer than this are retried at a reduced rate (never dropped) | No (default: `6`) |
 | `RECONCILE_SLOW_RETRY_MINUTES` | Interval between attempts for such jobs | No (default: `60`)                         |
 | `RECONCILE_INTERVAL_MINUTES` | Minutes between passes (matches the scheduler) | No (default: `5`)                      |
+| `MANAGER_URL`             | Public URL of this service; stamped into VM metadata, OIDC audience for `/runner/preempted` and `/tasks/provision` | No (routes disabled when unset) |
 | `PROVISION_QUEUE`         | Cloud Tasks queue path (`projects/../locations/../queues/..`) for webhook hand-off | No (inline creation when unset) |
 | `PROVISION_INVOKER_EMAIL` | Service account Cloud Tasks uses to call `/tasks/provision` | No (route disabled when unset)      |
-| `MANAGER_URL`             | Public URL of this service; stamped into VM metadata, OIDC audience for `/runner/preempted` and `/tasks/provision` | No (routes disabled when unset) |
 | `RUNNER_SERVICE_ACCOUNT_EMAIL` | Service account of the runner VMs allowed to call `/runner/preempted` | No (route disabled when unset) |
 | `PORT`                    | Web server port                | No (default: `8080`)                       |
 | `SETUP_USERNAME`          | Setup authentication username  | Yes for `/setup` (no default; from Secret Manager) |
@@ -318,8 +323,8 @@ No automatic re-run happens yet.
 *   `POST /setup/trigger-restart` - Restart application (requires HTTP Basic Auth)
 *   `POST /webhook` - Main GitHub webhook receiver (requires valid GitHub webhook signature)
 *   `POST /reconcile` - Reconcile queued jobs with runner VMs (requires a Google OIDC token for `RECONCILE_INVOKER_EMAIL`)
-*   `POST /tasks/provision` - Cloud Tasks handler that creates one job's VM (requires a Google OIDC token for `PROVISION_INVOKER_EMAIL`)
 *   `POST /runner/preempted` - A runner VM reports a Spot preemption (requires the VM service account's OIDC token, `format=full`)
+*   `POST /tasks/provision` - Cloud Tasks handler that creates one job's VM (requires a Google OIDC token for `PROVISION_INVOKER_EMAIL`)
 
 ## 💻 Local Development
 

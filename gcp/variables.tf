@@ -110,48 +110,64 @@ variable "github_runners_manager_max_instance_count" {
   }
 }
 
-# Cloud Tasks queue that carries webhook -> VM creation
-variable "github_runners_provision_max_dispatches_per_second" {
-  description = "Cloud Tasks dispatch rate for runner provisioning (tasks started per second)"
-  type        = number
-  default     = 5
-  validation {
-    condition     = var.github_runners_provision_max_dispatches_per_second > 0 && var.github_runners_provision_max_dispatches_per_second <= 500
-    error_message = "Dispatch rate must be between 0 and 500."
-  }
-}
-variable "github_runners_provision_max_concurrent_dispatches" {
-  description = "Cloud Tasks concurrent provisioning tasks in flight (each blocks on one Compute insert operation)"
-  type        = number
-  default     = 20
-  validation {
-    condition     = var.github_runners_provision_max_concurrent_dispatches >= 1 && var.github_runners_provision_max_concurrent_dispatches <= 1000
-    error_message = "Concurrent dispatches must be between 1 and 1000."
-  }
-}
-variable "github_runners_provision_max_attempts" {
-  description = "Cloud Tasks attempts per provisioning task before it is left to the reconciler (30 s to 300 s backoff)"
-  type        = number
-  default     = 8
-  validation {
-    condition     = var.github_runners_provision_max_attempts >= 1 && var.github_runners_provision_max_attempts <= 100
-    error_message = "Max attempts must be between 1 and 100."
-  }
-}
 # HTTP Basic Auth credentials for the /setup pages, stored in Secret Manager and mounted on the service
 variable "github_runners_manager_setup_username" {
   description = "Username for the GitHub Actions Runners manager /setup pages (stored in Secret Manager)"
   type        = string
   nullable    = false
+
+  validation {
     condition     = length(var.github_runners_manager_setup_username) >= 3
     error_message = "Setup username must be at least 3 characters."
+  }
+}
+
 variable "github_runners_manager_setup_password" {
   description = "Password for the GitHub Actions Runners manager /setup pages (stored in Secret Manager)"
   type        = string
   sensitive   = true
   nullable    = false
+
+  validation {
     condition     = length(var.github_runners_manager_setup_password) >= 12
     error_message = "Setup password must be at least 12 characters."
+  }
+}
+
+# Cloud Tasks queue that carries webhook -> VM creation
+variable "github_runners_provision_max_dispatches_per_second" {
+  description = "Cloud Tasks dispatch rate for runner provisioning (tasks started per second)"
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.github_runners_provision_max_dispatches_per_second > 0 && var.github_runners_provision_max_dispatches_per_second <= 500
+    error_message = "Dispatch rate must be between 0 and 500."
+  }
+}
+
+variable "github_runners_provision_max_concurrent_dispatches" {
+  description = "Cloud Tasks concurrent provisioning tasks in flight (each blocks on one Compute insert operation)"
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.github_runners_provision_max_concurrent_dispatches >= 1 && var.github_runners_provision_max_concurrent_dispatches <= 1000
+    error_message = "Concurrent dispatches must be between 1 and 1000."
+  }
+}
+
+variable "github_runners_provision_max_attempts" {
+  description = "Cloud Tasks attempts per provisioning task before it is left to the reconciler (30 s to 300 s backoff)"
+  type        = number
+  default     = 8
+
+  validation {
+    condition     = var.github_runners_provision_max_attempts >= 1 && var.github_runners_provision_max_attempts <= 100
+    error_message = "Max attempts must be between 1 and 100."
+  }
+}
+
 # Cron schedule for the reconciler that creates VMs for stuck queued jobs and deletes idle runner VMs
 variable "github_runners_reconcile_schedule" {
   description = "Cloud Scheduler cron schedule (UTC) for the reconcile pass of the GitHub Actions Runners manager; must be of the form */N * * * *"

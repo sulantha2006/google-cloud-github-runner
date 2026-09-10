@@ -5,6 +5,7 @@ import logging
 import os
 from flask import Blueprint, request, jsonify
 from app.clients.gcloud_client import InstanceCreationError, ZoneCapacityError
+from app.utils.auto_label import InvalidAutoLabel
 from app.services import WebhookService
 from app.utils.security import verify_google_oidc_token
 from app import limiter
@@ -39,8 +40,8 @@ def provision():
                 task_name, attempt, payload.get('job_id'), payload.get('delivery_id'))
     try:
         result = WebhookService().provision_from_task(payload)
-    except ValueError as e:
-        # A malformed payload will not get better with retries; the reconciler reports it.
+    except (InvalidAutoLabel, ValueError) as e:
+        # A malformed label or payload will not get better with retries; the reconciler reports it.
         logger.error("Provisioning task for job %s rejected: %s", payload.get('job_id'), e)
         return jsonify({'status': 'skipped', 'job_id': payload.get('job_id'), 'reason': str(e)}), 200
     except ZoneCapacityError as e:

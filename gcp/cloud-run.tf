@@ -44,10 +44,6 @@ module "cloud_run_github_runners_manager" {
         # Webhook -> Cloud Tasks -> POST /tasks/provision (only this caller, with MANAGER_URL as audience)
         PROVISION_QUEUE         = google_cloud_tasks_queue.github-runners-provision.id
         PROVISION_INVOKER_EMAIL = module.service-account-github-runners-provisioner.email
-        MANAGER_URL             = local.github_runners_manager_audience
-        RECONCILE_INVOKER_EMAIL = module.service-account-github-runners-reconciler.email
-        RECONCILE_AUDIENCE      = local.github_runners_manager_audience
-        RECONCILE_STUCK_MINUTES = tostring(var.github_runners_reconcile_stuck_minutes)
         # Stamped into runner VM metadata so the VM can report a Spot preemption to POST /runner/preempted;
         # only that route's caller (the runner VM service account) is accepted, with this URL as audience.
         MANAGER_URL                  = local.github_runners_manager_audience
