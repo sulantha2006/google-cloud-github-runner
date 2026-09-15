@@ -196,10 +196,10 @@ class WebhookService:
     def provision_from_task(self, payload):
         """Handle one Cloud Tasks provisioning task (idempotent).
 
-        Skips when the job will never run (completed/cancelled) or is not runnable yet, and when a
-        live VM for this job already exists; otherwise provisions through the same path as the
-        webhook. An ``in_progress`` job still provisions: it is running on a runner built for another
-        job, so the pool owes one back.
+        Skips when the job never occupied a runner (cancelled while queued, or not runnable yet) and
+        when a live VM for this job already exists; otherwise provisions through the same path as the
+        webhook. A job that is running -- or has already finished -- still provisions: it took a
+        runner built for another job, so the pool owes one back.
 
         Returns:
             dict: {'action': 'created'|'skipped', 'runner_name', 'job_id', 'reason'}.
@@ -225,13 +225,17 @@ class WebhookService:
                 logger.warning("Job %s not found on GitHub when re-checking; provisioning anyway", job_id)
                 job = {'status': 'queued'}
             status = job.get('status')
-            # An in_progress job is running on a runner built for some *other* job: GitHub hands an
-            # org-level ephemeral runner whichever queued job matches its label, not the one the VM was
-            # named for. Skipping here would leave the pool one runner short for good (the job that
-            # borrowed a runner added none), so it still provisions its replacement. Only a job that
-            # will never run again, or one not runnable yet (waiting on an approval), is skipped.
-            if status not in ('queued', 'in_progress'):
-                result['reason'] = f"job is {status}"
+            # GitHub hands an org-level ephemeral runner whichever queued job matches its label, not
+            # the job the VM was named for. So a job that is already running -- or has even finished,
+            # if it was quick -- is occupying a runner built for some other job, and that other job is
+            # now one short. Either way the pool owes a runner back, and skipping here would take one
+            # out of it for good.
+            #
+            # Only a job that never occupied a runner owes nothing: cancelled while queued, or not
+            # runnable yet (waiting on an environment approval). GitHub records a runner_name against
+            # every job that actually ran, so that is the test -- not the status.
+            if status not in ('queued', 'in_progress') and not job.get('runner_name'):
+                result['reason'] = f"job is {status} and never ran"
                 logger.info("Provisioning task for job %s skipped: %s, delivery_id: %s", job_id, result['reason'],
                             delivery_id)
                 return result

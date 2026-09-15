@@ -149,15 +149,33 @@ class TestProvisionFromTask:
         github.get_registration_token.assert_called_once_with(org_name='example-org', delivery_id='d-5')
 
     @pytest.mark.parametrize('job,reason', [
-        ({'status': 'completed'}, 'job is completed'),
-        ({'status': 'waiting'}, 'job is waiting'),
+        # cancelled before any runner picked it up: GitHub records no runner_name
+        ({'status': 'completed', 'conclusion': 'cancelled', 'runner_name': ''}, 'job is completed and never ran'),
+        # held for an environment approval: not runnable, so it has taken nothing from the pool
+        ({'status': 'waiting'}, 'job is waiting and never ran'),
     ])
-    def test_skips_when_the_job_will_not_run(self, job, reason):
+    def test_skips_a_job_that_never_occupied_a_runner(self, job, reason):
         service, github, gcloud, _ = _service()
         github.get_workflow_job.return_value = job
         result = service.provision_from_task(TASK)
         assert result['action'] == 'skipped' and result['reason'] == reason
         gcloud.create_runner_instance.assert_not_called()
+
+    def test_provisions_when_the_job_already_finished_on_another_runner(self):
+        """
+        A quick job can finish before its own provisioning task dispatches, having run on a VM built
+        for a different job. The runner it used is gone (deleted by the completed webhook) and the
+        job it borrowed from is still queued with nothing, so the pool is one short. Observed live:
+        job 104465995811 ran 11 s on gcp-runner-104465374863 and starved a peer.
+        """
+        service, github, gcloud, _ = _service()
+        github.get_workflow_job.return_value = {
+            'id': 4242, 'status': 'completed', 'conclusion': 'success',
+            'runner_name': 'gcp-runner-9999',  # a VM built for some other job
+        }
+        result = service.provision_from_task(TASK)
+        assert result['action'] == 'created' and result['runner_name'] == 'gcp-runner-4242'
+        gcloud.create_runner_instance.assert_called_once()
 
     def test_provisions_when_the_job_already_started_on_another_runner(self):
         """
