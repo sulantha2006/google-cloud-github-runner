@@ -149,15 +149,27 @@ class TestProvisionFromTask:
         github.get_registration_token.assert_called_once_with(org_name='example-org', delivery_id='d-5')
 
     @pytest.mark.parametrize('job,reason', [
-        ({'status': 'in_progress'}, 'job is in_progress'),
         ({'status': 'completed'}, 'job is completed'),
+        ({'status': 'waiting'}, 'job is waiting'),
     ])
-    def test_skips_when_job_no_longer_queued(self, job, reason):
+    def test_skips_when_the_job_will_not_run(self, job, reason):
         service, github, gcloud, _ = _service()
         github.get_workflow_job.return_value = job
         result = service.provision_from_task(TASK)
         assert result['action'] == 'skipped' and result['reason'] == reason
         gcloud.create_runner_instance.assert_not_called()
+
+    def test_provisions_when_the_job_already_started_on_another_runner(self):
+        """
+        GitHub gives an org-level ephemeral runner whichever queued job carries its label, so a job
+        that is already in_progress is running on a VM built for some *other* job. Skipping here
+        would take one runner out of the pool for good and starve the job that lent it out.
+        """
+        service, github, gcloud, _ = _service()
+        github.get_workflow_job.return_value = {'id': 4242, 'status': 'in_progress'}
+        result = service.provision_from_task(TASK)
+        assert result['action'] == 'created' and result['runner_name'] == 'gcp-runner-4242'
+        gcloud.create_runner_instance.assert_called_once()
 
     def test_skips_when_a_live_vm_for_the_job_exists(self):
         service, github, gcloud, _ = _service()

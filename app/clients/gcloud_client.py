@@ -23,6 +23,10 @@ ZONE_CACHE_SECONDS = 600
 ZONE_LABEL = 'gha-zone'
 # Instance label that records the GitHub workflow job id the VM was created for.
 JOB_ID_LABEL = 'gha-job-id'
+# Instance label holding the job label the runner registers with on GitHub (the pool it serves).
+# This is the *requested* label, not the rung that landed, so a downgraded VM still counts as
+# supply for the pool it was asked for.
+RUNNER_LABEL = 'gha-runner'
 # Instance label that records the gcp-auto rung the VM landed on (e.g. compute-8).
 RUNG_LABEL = 'gha-rung'
 # Instance labels set when the VM reports a Spot preemption (see /runner/preempted).
@@ -309,7 +313,7 @@ class GCloudClient:
             labels = {
                 "gha-owner": label_value(owner),
                 "gha-repo": label_value(repo),
-                "gha-runner": label_value(template_name),
+                RUNNER_LABEL: label_value(template_name),
             }
         if job_id is not None:
             labels[JOB_ID_LABEL] = str(job_id)
@@ -448,15 +452,33 @@ class GCloudClient:
                     delivery_id,
                 )
             except gapi_exceptions.Conflict as e:
-                # Another creator (webhook or reconciler) already inserted this name in this zone.
-                logger.info(
-                    "Instance %s already exists in zone %s; another creator won (%s), delivery_id: %s",
+                # Another creator (webhook or reconciler) already inserted this name in this zone --
+                # but the name is also still taken while a previous VM is being deleted. Only a live
+                # instance is supply; reporting success for a STOPPING one loses the whole pass.
+                existing = self.get_instance(instance_name, zone)
+                existing_status = getattr(existing, 'status', None) if existing is not None else None
+                if existing_status in LIVE_INSTANCE_STATUSES:
+                    logger.info(
+                        "Instance %s already exists in zone %s; another creator won (%s), delivery_id: %s",
+                        instance_name,
+                        zone,
+                        e,
+                        delivery_id,
+                    )
+                    return zone
+                logger.warning(
+                    "Instance %s cannot be created in zone %s: the name is held by an instance in state %s "
+                    "(%s), delivery_id: %s",
                     instance_name,
                     zone,
+                    existing_status or 'GONE',
                     e,
                     delivery_id,
                 )
-                return zone
+                raise InstanceCreationError(
+                    f"Name {instance_name} in zone {zone} is held by an instance in state "
+                    f"{existing_status or 'GONE'}; not created"
+                ) from e
             except Exception as e:
                 logger.error(
                     "Failed to create instance %s in zone %s: %s, delivery_id: %s",

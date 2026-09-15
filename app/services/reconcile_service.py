@@ -7,13 +7,16 @@ GitHub and Compute Engine waiting for an event that never comes. Run periodicall
 Scheduler -> POST /reconcile) this service:
 
 * creates a VM for every queued job on a ``gcp-`` label that has waited longer than
-  ``RECONCILE_STUCK_MINUTES`` with no VM for its job id (same path as the webhook);
+  ``RECONCILE_STUCK_MINUTES`` and that the pool cannot serve (same path as the webhook). Supply is
+  counted per (scope, runner label), not matched per job id: GitHub gives an org-level ephemeral
+  runner whichever queued job carries its label, so the VM named for job X routinely serves job Y;
 * deletes every runner VM older than ``RECONCILE_STUCK_MINUTES`` whose job is not running,
   deregistering its runner from GitHub first so it cannot pick up a job mid-delete;
 * never deletes a VM that GitHub reports as running a job (by runner name or busy flag).
 
 Every decision is logged with the job id, VM name, zone and reason, and returned in the report.
 """
+import collections
 import concurrent.futures
 import datetime
 import json
@@ -23,7 +26,7 @@ import sys
 import uuid
 
 from app.clients import GitHubClient, GCloudClient
-from app.clients.gcloud_client import JOB_ID_LABEL, LIVE_INSTANCE_STATUSES, label_value
+from app.clients.gcloud_client import JOB_ID_LABEL, LIVE_INSTANCE_STATUSES, RUNNER_LABEL, label_value
 from app.services.webhook_service import WebhookService
 
 logger = logging.getLogger(__name__)
@@ -45,7 +48,10 @@ HEARTBEAT_EVENT = 'reconcile_heartbeat'
 HEARTBEAT_MARKER = 'RECONCILE_HEARTBEAT'
 STUCK_JOB_EVENT = 'reconcile_stuck_job'
 # Suffix for VMs the reconciler creates, so a late webhook for the same job never races on
-# the same instance name in a different zone; both VMs carry the same gha-job-id label.
+# the same instance name in a different zone; both VMs carry the same gha-job-id label. A short
+# random tail makes every pass's name unique as well: the name of a VM that is still being deleted
+# would otherwise be taken, and the insert would fail for a whole pass. Nothing reads a job id back
+# out of an instance name -- the job id lives in the gha-job-id label -- so the tail costs nothing.
 RECONCILE_NAME_SUFFIX = '-r'
 
 
@@ -310,7 +316,23 @@ class ReconcileService:
                 )
 
         # --- Create phase ---------------------------------------------------------------
-        self._create_missing(queued_jobs, live_vms, deleted_job_ids, report, dry_run)
+        # Supply is counted per (scope, runner label), never matched per job id: GitHub hands an
+        # org-level ephemeral runner whichever queued job carries its label, not the job the VM was
+        # named for, so a VM labelled gha-job-id=X is very often serving job Y. A VM already running
+        # a job, and one retired in this pass, are not supply.
+        deleted_vm_names = {entry.get('vm') for entry in report['deleted']}
+        free_supply = collections.Counter()
+        for vm in live_vms:
+            if vm['name'] in deleted_vm_names or vm['name'] in running_runner_names:
+                continue
+            vm_labels = vm.get('labels') or {}
+            owner = (vm_labels.get('gha-owner') or '').lower()
+            repo_label = (vm_labels.get('gha-repo') or '').lower()
+            scope = scope_by_owner.get(owner) or scope_by_repo.get(f"{owner}/{repo_label}")
+            if scope is None:
+                continue  # not an installed repository; _reconcile_vm already skipped it
+            free_supply[(scope, vm_labels.get(RUNNER_LABEL, ''))] += 1
+        self._create_missing(queued_jobs, free_supply, deleted_job_ids, report, dry_run)
 
         logger.info(
             "Reconcile %s finished: %d queued job(s), %d live VM(s), %d deleted, %d created, %d kept, "
@@ -456,12 +478,25 @@ class ReconcileService:
     # create phase
     # ------------------------------------------------------------------
 
-    def _create_missing(self, queued_jobs, live_vms, deleted_job_ids, report, dry_run):
-        covered = {str((vm.get('labels') or {}).get(JOB_ID_LABEL)) for vm in live_vms}
+    def _create_missing(self, queued_jobs, free_supply, deleted_job_ids, report, dry_run):
+        """
+        Create VMs for the queued jobs this pool cannot serve.
+
+        ``free_supply`` counts live VMs that are not running a job, per (scope, runner label). Jobs
+        are walked oldest first and each one consumes one free runner of its pool: which VM takes
+        which job is GitHub's choice, so only the count matters. Whatever is left over once the pool
+        is exhausted, and has waited past the stuck threshold, gets a VM.
+        """
+        supply = collections.Counter(free_supply)
         candidates = []
         templates = None
         provisionable = {}  # label -> bool, resolved once per pass against the template list
-        for repo, job in queued_jobs:
+
+        def queued_since(item):
+            created = parse_github_time(item[1].get('created_at'))
+            return (created is None, created or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+
+        for repo, job in sorted(queued_jobs, key=queued_since):
             job_id = str(job.get('id'))
             created_at = parse_github_time(job.get('created_at'))
             entry = {'job_id': job_id, 'repo': repo.get('full_name'), 'job': job.get('name')}
@@ -470,7 +505,12 @@ class ReconcileService:
                                self.run_id, job_id, repo.get('full_name'))
                 report['skipped'].append({**entry, 'reason': 'its VM was deleted in this pass; retry next pass'})
                 continue
-            if job_id in covered:
+            label = template_label_for(job.get('labels'))
+            pool = (self._scope_for_repo(repo), label_value(label))
+            if supply[pool] > 0:
+                # A free runner in this pool will take this job; the job id it is labelled with is
+                # bookkeeping, not a promise GitHub made.
+                supply[pool] -= 1
                 continue
             if not self._is_stuck(created_at):
                 continue
@@ -496,7 +536,6 @@ class ReconcileService:
                     report['skipped'].append({**entry, 'reason': reason})
                     continue
             # Jobs without a template must not consume the per-pass creation budget.
-            label = template_label_for(job.get('labels'))
             if label not in provisionable:
                 if templates is None:
                     templates = self.gcloud_client.list_templates()
@@ -577,5 +616,5 @@ class ReconcileService:
             org_name,
             job_id=job.get('id'),
             delivery_id=self.run_id,
-            name_suffix=RECONCILE_NAME_SUFFIX,
+            name_suffix=f"{RECONCILE_NAME_SUFFIX}{uuid.uuid4().hex[:4]}",
         )

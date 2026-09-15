@@ -43,8 +43,9 @@ def job(job_id, status, age_minutes=15, runner_name='', labels=(LABEL,), conclus
     }
 
 
-def vm(name, age_minutes=15, job_id=None, status='RUNNING', owner='example-org', repo='example-repo', zone='us-central1-b'):
-    labels = {'gha-owner': owner, 'gha-repo': repo, 'gha-runner': LABEL, 'gha-zone': zone}
+def vm(name, age_minutes=15, job_id=None, status='RUNNING', owner='example-org', repo='example-repo',
+       zone='us-central1-b', runner_label=LABEL):
+    labels = {'gha-owner': owner, 'gha-repo': repo, 'gha-runner': runner_label, 'gha-zone': zone}
     if job_id is not None:
         labels['gha-job-id'] = str(job_id)
     return {'name': name, 'zone': zone, 'status': status, 'labels': labels, 'created_at': minutes_ago(age_minutes)}
@@ -133,9 +134,12 @@ class FakeGCloud:
 
 
 class FakeProvisioner:
-    def __init__(self, error_for=()):
+    def __init__(self, error_for=(), taken_names=()):
         self.calls = []
         self.error_for = set(str(j) for j in error_for)
+        # Names Compute Engine would refuse: a VM of that name already exists, live or still
+        # deleting. Real inserts 409 on these.
+        self.taken_names = set(taken_names)
 
     def provision_runner(self, template_name, repo_url, repo_owner_url, repo_name, org_name,
                          job_id=None, delivery_id=None, name_suffix=''):
@@ -144,7 +148,11 @@ class FakeProvisioner:
                            'delivery_id': delivery_id, 'name_suffix': name_suffix})
         if str(job_id) in self.error_for:
             raise RuntimeError(f'boom {job_id}')
-        return f'gcp-runner-{job_id}{name_suffix}'
+        name = f'gcp-runner-{job_id}{name_suffix}'
+        if name in self.taken_names:
+            raise RuntimeError(f'409: {name} already exists')
+        self.taken_names.add(name)
+        return name
 
 
 def run_pass(github, gcloud, provisioner=None, dry_run=False, **kwargs):
@@ -350,11 +358,13 @@ class TestCreateDecisions:
         call = provisioner.calls[0]
         assert call['template'] == LABEL
         assert call['job_id'] == 42
-        assert call['name_suffix'] == RECONCILE_NAME_SUFFIX
+        assert call['name_suffix'].startswith(RECONCILE_NAME_SUFFIX)
         assert call['org_name'] == 'example-org'
         assert call['repo_name'] == 'example-org/example-repo'
         assert call['owner_url'] == 'https://github.com/example-org'
-        assert report['created'][0]['vm'] == 'gcp-runner-42-r'
+        assert report['created'][0]['vm'].startswith(f'gcp-runner-42{RECONCILE_NAME_SUFFIX}')
+        assert report['created'][0]['vm'] != f'gcp-runner-42{RECONCILE_NAME_SUFFIX}', \
+            'the name carries a random tail so a pass never collides with a VM still being deleted'
 
     def test_recently_queued_job_is_left_to_the_webhook(self):
         github = FakeGitHub(jobs={ORG_REPO['full_name']: [job(42, 'queued', age_minutes=2)]})
@@ -652,3 +662,84 @@ class TestHeartbeat:
         with pytest.raises(RuntimeError):
             service.run()
         assert 'reconcile_heartbeat' not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Create direction: supply is counted per pool, never matched per job id
+#
+# GitHub hands an org-level ephemeral runner whichever queued job carries its label, not the job
+# the VM was named for. Every case here has a VM whose gha-job-id points at one job while another
+# job is the one that actually needs a runner.
+# ---------------------------------------------------------------------------
+
+class TestSupplyIsCountedPerPool:
+    def test_vm_named_for_a_job_but_running_another_does_not_cover_it(self):
+        """
+        The starvation case: the VM built for job 1 was handed to job 2. Job 1 is still queued and
+        the pool is a runner short, so it must get one -- matching gha-job-id would see "job 1 has
+        a VM" and leave it queued for the whole lifetime of job 2.
+        """
+        github = FakeGitHub(
+            jobs={ORG_REPO['full_name']: [
+                job(1, 'queued'),
+                job(2, 'in_progress', runner_name=f'gcp-runner-1{RECONCILE_NAME_SUFFIX}'),
+            ]},
+            runners={('org', 'example-org'): [runner(f'gcp-runner-1{RECONCILE_NAME_SUFFIX}', busy=True)]},
+        )
+        gcloud = FakeGCloud([vm(f'gcp-runner-1{RECONCILE_NAME_SUFFIX}', job_id=1)])
+        # The previous pass's name is taken by the VM now serving job 2, so the replacement must not
+        # reuse it -- otherwise the insert 409s and the whole pass is lost.
+        provisioner = FakeProvisioner(taken_names={f'gcp-runner-1{RECONCILE_NAME_SUFFIX}'})
+        report, provisioner = run_pass(github, gcloud, provisioner=provisioner)
+
+        assert report['errors'] == [], 'the replacement must not collide with the existing VM name'
+        assert [call['job_id'] for call in provisioner.calls] == [1], 'job 1 must be re-provisioned'
+        assert gcloud.deleted == [], 'the VM is running job 2 and must not be touched'
+        assert 'in_progress job on this runner name' in reasons(report, 'kept')[0]
+
+    def test_a_free_vm_covers_a_stuck_job_it_is_not_named_for(self):
+        """
+        The other direction: an idle runner in the pool will take the oldest queued job whatever its
+        label says, so provisioning a second VM would just leave one idling until it is retired.
+        """
+        github = FakeGitHub(jobs={ORG_REPO['full_name']: [job(1, 'queued', age_minutes=15),
+                                                          job(2, 'queued', age_minutes=5)]})
+        gcloud = FakeGCloud([vm('gcp-runner-2', age_minutes=5, job_id=2)])
+        report, provisioner = run_pass(github, gcloud)
+
+        assert provisioner.calls == [], 'the free runner covers job 1; nothing to create'
+        assert report['created'] == []
+
+    def test_a_free_vm_in_another_pool_does_not_cover(self):
+        """Pools are keyed by the label the runner registers with: a std16 VM cannot serve compute-4."""
+        other_label = 'gcp-auto-compute-4'
+        github = FakeGitHub(jobs={ORG_REPO['full_name']: [job(1, 'queued', age_minutes=15, labels=(other_label,)),
+                                                          job(9, 'queued', age_minutes=5)]})
+        gcloud = FakeGCloud([vm('gcp-runner-9', age_minutes=5, job_id=9, runner_label=LABEL)])
+        _, provisioner = run_pass(github, gcloud)
+
+        assert [call['job_id'] for call in provisioner.calls] == [1]
+        assert provisioner.calls[0]['template'] == other_label
+
+    def test_a_free_vm_of_another_scope_does_not_cover(self):
+        """A user-repo runner is not in the organization's pool, however its label reads."""
+        github = FakeGitHub(
+            repos=[ORG_REPO, USER_REPO],
+            jobs={ORG_REPO['full_name']: [job(1, 'queued', age_minutes=15)],
+                  USER_REPO['full_name']: [job(2, 'queued', age_minutes=5)]},
+        )
+        gcloud = FakeGCloud([vm('gcp-runner-2', age_minutes=5, job_id=2, owner='octocat', repo='hello')])
+        _, provisioner = run_pass(github, gcloud)
+
+        assert [call['job_id'] for call in provisioner.calls] == [1]
+
+    def test_the_oldest_job_takes_the_free_runner(self):
+        """Supply goes to the longest waiter; the newer job is the one that gets a new VM."""
+        github = FakeGitHub(jobs={ORG_REPO['full_name']: [job(1, 'queued', age_minutes=12),
+                                                          job(2, 'queued', age_minutes=40),
+                                                          job(3, 'queued', age_minutes=5)]})
+        gcloud = FakeGCloud([vm('gcp-runner-3', age_minutes=5, job_id=3)])
+        _, provisioner = run_pass(github, gcloud)
+
+        # job 2 (oldest) consumes the free runner; job 1 is stuck and uncovered; job 3 is too young.
+        assert [call['job_id'] for call in provisioner.calls] == [1]

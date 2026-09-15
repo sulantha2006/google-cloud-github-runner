@@ -5,6 +5,7 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+from google.api_core import exceptions as gapi_exceptions
 from google.cloud import compute_v1
 
 from app.clients import gcloud_client
@@ -186,3 +187,56 @@ class TestCrossZoneDelete:
 
         instances.delete.assert_called_once_with(project='test-project', zone='us-central1-b', instance='gcp-runner-abc')
         assert any('aggregatedList denied' in r.message for r in caplog.records)
+
+
+class TestNameHeldByAnotherInstance:
+    """
+    A 409 on insert means the name is taken -- but by what? Another creator that genuinely won the
+    race (supply exists, report success), or the VM we just deleted, still STOPPING (no supply at
+    all). Reporting success for the second case loses a whole reconcile pass.
+    """
+
+    def _existing(self, status):
+        instance = MagicMock()
+        instance.status = status
+        return instance
+
+    def test_live_instance_means_another_creator_won(self, clients, caplog):
+        instances, _, _ = clients
+        instances.insert.side_effect = gapi_exceptions.Conflict('already exists')
+        instances.get.return_value = self._existing('RUNNING')
+        client = GCloudClient()
+
+        with caplog.at_level(logging.INFO, logger='app.clients.gcloud_client'):
+            name = client.create_runner_instance(
+                'tok', 'https://github.com/o/r', 'gcp-ubuntu-24.04', 'o/r', delivery_id='d-won'
+            )
+
+        assert name.startswith('gcp-runner-')
+        assert any('another creator won' in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize('status', ['STOPPING', 'TERMINATED'])
+    def test_dying_instance_is_not_supply_and_fails_the_create(self, clients, caplog, status):
+        instances, _, _ = clients
+        instances.insert.side_effect = gapi_exceptions.Conflict('already exists')
+        instances.get.return_value = self._existing(status)
+        client = GCloudClient()
+
+        with caplog.at_level(logging.WARNING, logger='app.clients.gcloud_client'):
+            with pytest.raises(InstanceCreationError) as excinfo:
+                client.create_runner_instance(
+                    'tok', 'https://github.com/o/r', 'gcp-ubuntu-24.04', 'o/r', delivery_id='d-dying'
+                )
+
+        assert status in str(excinfo.value)
+        assert not isinstance(excinfo.value, ZoneCapacityError), 'not a capacity error: do not walk the ladder down'
+        assert any('held by an instance in state' in r.message for r in caplog.records)
+
+    def test_vanished_instance_also_fails_rather_than_reporting_a_phantom_vm(self, clients):
+        instances, _, _ = clients
+        instances.insert.side_effect = gapi_exceptions.Conflict('already exists')
+        instances.get.side_effect = gapi_exceptions.NotFound('gone')
+        client = GCloudClient()
+
+        with pytest.raises(InstanceCreationError):
+            client.create_runner_instance('tok', 'https://github.com/o/r', 'gcp-ubuntu-24.04', 'o/r')

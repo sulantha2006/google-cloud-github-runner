@@ -196,8 +196,10 @@ class WebhookService:
     def provision_from_task(self, payload):
         """Handle one Cloud Tasks provisioning task (idempotent).
 
-        Skips when the job is no longer queued on GitHub or a live VM for the job already exists,
-        otherwise provisions through the same path as the webhook.
+        Skips when the job will never run (completed/cancelled) or is not runnable yet, and when a
+        live VM for this job already exists; otherwise provisions through the same path as the
+        webhook. An ``in_progress`` job still provisions: it is running on a runner built for another
+        job, so the pool owes one back.
 
         Returns:
             dict: {'action': 'created'|'skipped', 'runner_name', 'job_id', 'reason'}.
@@ -223,7 +225,12 @@ class WebhookService:
                 logger.warning("Job %s not found on GitHub when re-checking; provisioning anyway", job_id)
                 job = {'status': 'queued'}
             status = job.get('status')
-            if status != 'queued':
+            # An in_progress job is running on a runner built for some *other* job: GitHub hands an
+            # org-level ephemeral runner whichever queued job matches its label, not the one the VM was
+            # named for. Skipping here would leave the pool one runner short for good (the job that
+            # borrowed a runner added none), so it still provisions its replacement. Only a job that
+            # will never run again, or one not runnable yet (waiting on an approval), is skipped.
+            if status not in ('queued', 'in_progress'):
                 result['reason'] = f"job is {status}"
                 logger.info("Provisioning task for job %s skipped: %s, delivery_id: %s", job_id, result['reason'],
                             delivery_id)
